@@ -1,9 +1,8 @@
-io
-os
-tempfile
-datetime
-cv2
-pandas
+--extra-index-url https://download.pytorch.org/whl/cpu
 streamlit
-Image
-ImageOps
+ultralytics
+torch
+torchvision
+pillow
+pandas
+streamlit-js-eval
