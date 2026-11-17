@@ -5,4 +5,5 @@ datetime
 cv2
 pandas
 streamlit
-Image, ImageOps
+Image
+ImageOps
