@@ -10,10 +10,10 @@ from PIL import Image, ImageOps
 
 st.set_page_config(page_title="Crack Detection", page_icon="🔍", layout="wide")
 
-MODEL_PATH = "best.pt"  # your trained YOLO segmentation weights
+MODEL_PATH = "best .pt"  
 
 
-# ---------- model ----------
+
 @st.cache_resource
 def load_model(path: str):
     from ultralytics import YOLO
@@ -29,7 +29,7 @@ except Exception as e:
 class_names = list(model.names.values())
 
 
-# ---------- helpers ----------
+
 def _to_deg(dms) -> float:
     d, m, s = (float(x) for x in dms)
     return d + m / 60 + s / 3600
@@ -116,11 +116,11 @@ def ranked_by_location(df: pd.DataFrame) -> pd.DataFrame:
 if "log" not in st.session_state:
     st.session_state.log = []
 
-# ---------- settings (edit these values here) ----------
-conf = 0.25      # confidence threshold
-imgsz = 640      # use the size you trained at
-stride = 3       # video: analyze every Nth frame (raise for faster processing)
-# classes counted as cracks: any class with "crack" in its name (falls back to all classes)
+
+conf = 0.25      
+imgsz = 640      
+stride = 3       
+
 selected_lower = {c.lower() for c in class_names if "crack" in c.lower()} or {
     c.lower() for c in class_names
 }
@@ -130,7 +130,7 @@ st.caption("Upload an image or a video, set where it was captured, and detect cr
 
 tab_img, tab_vid = st.tabs(["📷 Image", "🎥 Video"])
 
-# ---------- image tab ----------
+
 with tab_img:
     mode = st.radio("Image source", ["Upload photo", "Take photo"], horizontal=True)
     file = (
@@ -165,7 +165,7 @@ with tab_img:
             st.image(annotated, caption=f"{n} crack(s) detected", use_container_width=True)
             add_log("image", getattr(file, "name", "camera.jpg"), location, source, n)
 
-# ---------- video tab ----------
+
 with tab_vid:
     st.info(
         "Videos rarely carry GPS data, so set one location for the whole video. "
@@ -247,7 +247,7 @@ with tab_vid:
                 except OSError:
                     pass
 
-# ---------- ranked table ----------
+
 if st.session_state.log:
     st.divider()
     df = pd.DataFrame(st.session_state.log)
