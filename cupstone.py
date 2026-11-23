@@ -2,13 +2,14 @@ import io
 import os
 import sqlite3
 import tempfile
-import xml.etree.ElementTree as ET
+import time
 from contextlib import closing
 from datetime import datetime
 
 import cv2
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from PIL import Image, ImageOps
 
@@ -189,37 +190,6 @@ def pick_location(key: str, exif_loc=None, quiet=False):
     return None, None
 
 
-def parse_gpx(data: bytes):
-    """Return (times_sec, lats, lons) with times relative to the first point."""
-    root = ET.fromstring(data)
-    pts = []
-    for el in root.iter():
-        if el.tag.endswith("trkpt") or el.tag.endswith("rtept"):
-            t = next((c.text for c in el if c.tag.endswith("time")), None)
-            if t:
-                ts = datetime.fromisoformat(t.strip().replace("Z", "+00:00")).timestamp()
-                pts.append((ts, float(el.attrib["lat"]), float(el.attrib["lon"])))
-    if len(pts) < 2:
-        raise ValueError("GPX needs at least 2 timestamped points")
-    pts.sort()
-    t0 = pts[0][0]
-    return (
-        [p[0] - t0 for p in pts],
-        [p[1] for p in pts],
-        [p[2] for p in pts],
-    )
-
-
-def make_locator(times, lats, lons, offset=0.0):
-    """Return a function t(seconds into video) -> (lat, lon)."""
-
-    def locate(t):
-        tt = t + offset
-        return float(np.interp(tt, times, lats)), float(np.interp(tt, times, lons))
-
-    return locate
-
-
 NO_LOCATION = "Not given location"
 
 
@@ -231,6 +201,32 @@ def tidy_log(df: pd.DataFrame) -> pd.DataFrame:
         d[c] = d[c].map(lambda v: f"{v:.6f}" if pd.notna(v) else NO_LOCATION)
     d["location_source"] = d["location_source"].fillna(NO_LOCATION)
     return d
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def place_name(lat: float, lon: float) -> str:
+    """Area or city name for a coordinate (OpenStreetMap Nominatim, English if available).
+    Raises on network errors so a failed lookup is not cached. Nominatim allows ~1 request/second."""
+    time.sleep(1.1)
+    r = requests.get(
+        "https://nominatim.openstreetmap.org/reverse",
+        params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 14,
+                "addressdetails": 1, "accept-language": "en"},
+        headers={"User-Agent": "crack-detection-streamlit-app"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    a = r.json().get("address", {})
+    # area first, then city/town/village; the street is deliberately left out
+    return (a.get("neighbourhood") or a.get("suburb") or a.get("city_district")
+            or a.get("quarter") or a.get("town") or a.get("city") or a.get("village") or "")
+
+
+def place_label(lat, lon, fallback: str) -> str:
+    try:
+        return place_name(float(lat), float(lon)) or fallback
+    except Exception:
+        return fallback
 
 
 # ----------------------------------------------------------------- ranking
@@ -324,39 +320,18 @@ with tab_img:
 with tab_vid:
     st.info(
         "Each crack/hole is tracked across frames and logged separately. "
-        "By default they all get the device location; add a GPX track below "
-        "to give each one its own location along the route."
+        "All of them get the device location."
     )
     vid = st.file_uploader("Choose a video", type=["mp4", "mov", "avi", "mkv"], key="vid_up")
 
     if vid:
         st.video(vid)
 
-        locator, v_source = None, None
-
-        with st.expander("Optional: GPX track (gives each crack its own location)"):
-            gpx = st.file_uploader("GPX file recorded while filming", type=["gpx"], key="gpx_up")
-            offset = st.number_input(
-                "Offset (seconds) if the GPX started before (+) / after (-) the video",
-                value=0.0,
-                step=1.0,
-            )
-
-        if gpx:
-            try:
-                tm, la, lo = parse_gpx(gpx.getvalue())
-                locator = make_locator(tm, la, lo, offset)
-                v_source = "GPX track"
-            except Exception as e:
-                st.error(f"Could not read GPX: {e}")
-        else:
-            fixed, fixed_src = pick_location("vid")
-            if fixed:
-                locator = lambda t, f=fixed: f
-                v_source = fixed_src
+        fixed, v_source = pick_location("vid")
+        locator = (lambda t, f=fixed: f) if fixed else None
 
         if locator is None:
-            st.warning("Provide a location source above to enable detection.")
+            st.warning("Waiting for the device location. Allow location access in your browser.")
 
         if locator is not None and st.button("Run detection on video", type="primary", key="vid_run"):
             suffix = os.path.splitext(vid.name)[1] or ".mp4"
@@ -370,7 +345,6 @@ with tab_vid:
             fps = cap.get(cv2.CAP_PROP_FPS) or 25
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            duration = total / fps
 
             writer = cv2.VideoWriter(
                 out_path, cv2.VideoWriter_fourcc(*"mp4v"), max(fps / stride, 1), (w, h)
@@ -484,10 +458,17 @@ if not df.empty:
     st.subheader("📍 Locations ranked by cracks and holes")
     ranked = ranked_by_location(df)
     shown = ranked.drop(columns=["lat", "lon"])
-    shown.insert(
-        0, "location",
-        np.where(ranked["lat"].isna() | ranked["lon"].isna(), NO_LOCATION, "Recorded"),
-    )
+    labels, n = [], 0
+    with st.spinner("Looking up area names..."):
+        for la_, lo_ in zip(ranked["lat"], ranked["lon"]):
+            if pd.isna(la_) or pd.isna(lo_):
+                labels.append(NO_LOCATION)
+            else:
+                n += 1
+                fallback = f"Location {n}"
+                # only look up the top 15 places to stay within the free service's limits
+                labels.append(place_label(la_, lo_, fallback) if n <= 15 else fallback)
+    shown.insert(0, "location", labels)
     st.dataframe(shown, use_container_width=True)
 
     with_loc = ranked.dropna(subset=["lat", "lon"])
