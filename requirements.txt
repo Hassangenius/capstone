@@ -5,4 +5,6 @@ torch
 torchvision
 pillow
 pandas
+numpy
+opencv-python-headless
 streamlit-js-eval
