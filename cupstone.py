@@ -1,8 +1,11 @@
 import io
+import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from contextlib import closing
 from datetime import datetime
 
@@ -11,15 +14,17 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image, ImageOps
 
-st.set_page_config(page_title="Crack & Hole Detection", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Crack Detection", page_icon="🔍", layout="wide")
 
-MODEL_PATH = "best_test.pt"
+MODEL_PATH = "best_pretrained.pt"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detections.db")
+NO_LOCATION = "No given location"
 
 
-# ---------------------------------------------------------------- database
+
 def init_db():
     with closing(sqlite3.connect(DB_PATH)) as conn:
         with conn:
@@ -44,11 +49,11 @@ def init_db():
 
 
 def add_logs(rows):
-    """rows: list of (kind, name, location, source, cracks, holes, video_time)"""
+    """rows: list of (kind, name, location, source, cracks, video_time)"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data = [
-        (now, k, n, loc[0] if loc else None, loc[1] if loc else None, s, int(c), int(h), vt)
-        for k, n, loc, s, c, h, vt in rows
+        (now, k, n, loc[0] if loc else None, loc[1] if loc else None, s, int(c), 0, vt)
+        for k, n, loc, s, c, vt in rows
     ]
     with closing(sqlite3.connect(DB_PATH)) as conn:
         with conn:
@@ -63,15 +68,15 @@ def add_logs(rows):
             )
 
 
-def add_log(kind, name, location, source, cracks, holes):
-    add_logs([(kind, name, location, source, cracks, holes, None)])
+def add_log(kind, name, location, source, cracks):
+    add_logs([(kind, name, location, source, cracks, None)])
 
 
 def load_log() -> pd.DataFrame:
     with closing(sqlite3.connect(DB_PATH)) as conn:
         return pd.read_sql_query(
             "SELECT time, type, file, latitude, longitude, location_source, "
-            "cracks_found, holes_found, video_time FROM detections ORDER BY id",
+            "cracks_found, video_time FROM detections ORDER BY id",
             conn,
         )
 
@@ -85,7 +90,7 @@ def clear_log():
 init_db()
 
 
-# ------------------------------------------------------------------- model
+
 @st.cache_resource
 def load_model(path: str):
     from ultralytics import YOLO
@@ -98,25 +103,15 @@ except Exception as e:
     st.error(f"Could not load `{MODEL_PATH}`: {e}")
     st.stop()
 
-
-def kind_of(cls_id: int):
-    name = model.names[int(cls_id)].lower()
-    if "hole" in name:
-        return "hole"
-    if "crack" in name:
-        return "crack"
-    return None
+# Only the crack classes are used; any other class (e.g. holes) is ignored.
+CRACK_IDS = [int(i) for i, n in model.names.items() if "crack" in n.lower()]
+if not CRACK_IDS:
+    st.error(f"No class with 'crack' in its name was found in the model. Classes: {model.names}")
+    st.stop()
 
 
-def count_types(result) -> dict:
-    counts = {"crack": 0, "hole": 0}
-    if result.boxes is None or len(result.boxes) == 0:
-        return counts
-    for c in result.boxes.cls.int().tolist():
-        k = kind_of(c)
-        if k:
-            counts[k] += 1
-    return counts
+def count_cracks(result) -> int:
+    return 0 if result.boxes is None else len(result.boxes)
 
 
 def remove_overlaps(result, contain_thr: float):
@@ -147,7 +142,6 @@ def remove_overlaps(result, contain_thr: float):
     return result[sorted(keep)]
 
 
-# ---------------------------------------------------------------- location
 def _to_deg(dms) -> float:
     d, m, s = (float(x) for x in dms)
     return d + m / 60 + s / 3600
@@ -173,24 +167,65 @@ def read_exif(img: Image.Image):
         return None, taken
 
 
-def pick_location(key: str, exif_loc=None, quiet=False):
-    """Return ((lat, lon) or None, source): photo EXIF if available, else the device's location."""
-    if exif_loc:
-        return exif_loc, "Photo EXIF"
+def device_location(key: str, quiet=False):
+    """(lat, lon) from the browser/device location, or None while waiting."""
     try:
         from streamlit_js_eval import get_geolocation
     except ImportError:
         st.error("Install `streamlit-js-eval` (pip install streamlit-js-eval) to get the device location.")
-        return None, None
+        return None
     loc = get_geolocation(component_key=f"{key}_geo")
     if loc and "coords" in loc:
-        return (loc["coords"]["latitude"], loc["coords"]["longitude"]), "Device location"
+        return loc["coords"]["latitude"], loc["coords"]["longitude"]
     if not quiet:
         st.info("📍 Allow location access in your browser to attach a location...")
-    return None, None
+    return None
 
 
-NO_LOCATION = "Not given location"
+def video_metadata_location(data: bytes):
+    """GPS stored by the phone inside the video file (QuickTime/MP4 '©xyz' atom).
+    This is ONE point for the whole video (usually where recording started)."""
+    i = data.find(b"\xa9xyz")
+    if i == -1:
+        return None
+    m = re.search(rb"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)", data[i + 8:i + 80])
+    if not m:
+        return None
+    lat, lon = float(m.group(1)), float(m.group(2))
+    if abs(lat) > 90 or abs(lon) > 180 or (lat == 0 and lon == 0):
+        return None
+    return lat, lon
+
+
+def parse_gpx(data: bytes):
+    """Return a sorted list of (unix_time, lat, lon) from a GPX track."""
+    root = ET.fromstring(data)
+    pts = []
+    for el in root.iter():
+        if el.tag.endswith("trkpt"):
+            t = None
+            for ch in el:
+                if ch.tag.endswith("time") and ch.text:
+                    t = datetime.fromisoformat(ch.text.strip().replace("Z", "+00:00"))
+            if t is not None:
+                pts.append((t.timestamp(), float(el.get("lat")), float(el.get("lon"))))
+    pts.sort()
+    return pts
+
+
+def gpx_locator(pts, offset_s: float):
+    """Function t_seconds_in_video -> (lat, lon). The video start is matched to the
+    first GPX point (+ offset)."""
+    ts = np.array([p[0] for p in pts])
+    la = np.array([p[1] for p in pts])
+    lo = np.array([p[2] for p in pts])
+    t0 = ts[0]
+
+    def f(t):
+        x = t0 + t + offset_s
+        return float(np.interp(x, ts, la)), float(np.interp(x, ts, lo))
+
+    return f
 
 
 def tidy_log(df: pd.DataFrame) -> pd.DataFrame:
@@ -204,71 +239,120 @@ def tidy_log(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, ttl=86400)
-def place_name(lat: float, lon: float) -> str:
-    """Area or city name for a coordinate (OpenStreetMap Nominatim, English if available).
+def governorate_name(lat: float, lon: float) -> str:
+    """Governorate (state-level region) for a coordinate (OpenStreetMap Nominatim, English if available).
     Raises on network errors so a failed lookup is not cached. Nominatim allows ~1 request/second."""
     time.sleep(1.1)
     r = requests.get(
         "https://nominatim.openstreetmap.org/reverse",
-        params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 14,
+        params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 8,
                 "addressdetails": 1, "accept-language": "en"},
         headers={"User-Agent": "crack-detection-streamlit-app"},
         timeout=10,
     )
     r.raise_for_status()
     a = r.json().get("address", {})
-    # area first, then city/town/village; the street is deliberately left out
-    return (a.get("neighbourhood") or a.get("suburb") or a.get("city_district")
-            or a.get("quarter") or a.get("town") or a.get("city") or a.get("village") or "")
+    return (a.get("state") or a.get("state_district") or a.get("region")
+            or a.get("county") or "")
 
 
-def place_label(lat, lon, fallback: str) -> str:
+def governorate_label(lat, lon, fallback: str) -> str:
     try:
-        return place_name(float(lat), float(lon)) or fallback
+        return governorate_name(float(lat), float(lon)) or fallback
     except Exception:
         return fallback
 
 
-# ----------------------------------------------------------------- ranking
-def ranked_by_location(df: pd.DataFrame) -> pd.DataFrame:
-    """Group by location (~11 m grid); the location with the most defects comes first.
-    Detections without a location are grouped together in one row with empty lat/lon."""
+
+TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+TILE_ATTR = "Tiles &copy; Esri"
+
+
+def show_map(points, height: int = 400):
+    """points: list of dicts with lat, lon, r (marker radius in px) and optional label."""
+    if not points:
+        return
+    html = f"""
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <div id="map" style="height:{height}px;border-radius:8px"></div>
+    <script>
+      const pts = {json.dumps(points)};
+      const map = L.map('map');
+      L.tileLayer('{TILE_URL}', {{maxZoom: 19, attribution: '{TILE_ATTR}'}}).addTo(map);
+      const bounds = [];
+      pts.forEach(p => {{
+        const m = L.circleMarker([p.lat, p.lon],
+          {{radius: p.r, color: '#d62728', fillColor: '#d62728', fillOpacity: 0.6}}).addTo(map);
+        if (p.label) m.bindTooltip(p.label);
+        bounds.push([p.lat, p.lon]);
+      }});
+      if (bounds.length === 1) map.setView(bounds[0], 16);
+      else map.fitBounds(bounds, {{padding: [30, 30]}});
+    </script>
+    """
+    components.html(html, height=height + 10)
+
+
+
+def ranked_by_governorate(df: pd.DataFrame):
+    """Name each place with its governorate and rank governorates by cracks.
+    Returns (ranked table, grid points for the map)."""
     d = df.copy()
-    d["lat"] = d["latitude"].round(4)
+    d["lat"] = d["latitude"].round(4)  # ~11 m grid, used for the map
     d["lon"] = d["longitude"].round(4)
     g = d.groupby(["lat", "lon"], as_index=False, dropna=False).agg(
         total_cracks=("cracks_found", "sum"),
-        total_holes=("holes_found", "sum"),
-        detections=("file", "count"),
         last_detection=("time", "max"),
     )
-    g["total_defects"] = g["total_cracks"] + g["total_holes"]
-    g = g.sort_values("total_defects", ascending=False).reset_index(drop=True)
-    g.index = g.index + 1
-    g.index.name = "rank"
-    return g
+    g = g.sort_values("total_cracks", ascending=False).reset_index(drop=True)
+
+    
+    names, labels = {}, []
+    for la, lo in zip(g["lat"], g["lon"]):
+        if pd.isna(la) or pd.isna(lo):
+            labels.append(NO_LOCATION)
+            continue
+        cell = (round(la, 2), round(lo, 2))
+        if cell not in names:
+            names[cell] = governorate_label(la, lo, "Unknown governorate") if len(names) < 30 else "Other"
+        labels.append(names[cell])
+    g.insert(0, "governorate", labels)
+
+    table = g.groupby("governorate", as_index=False).agg(
+        total_cracks=("total_cracks", "sum"),
+        last_detection=("last_detection", "max"),
+    )
+    table = table.sort_values("total_cracks", ascending=False).reset_index(drop=True)
+    table.index = table.index + 1
+    table.index.name = "rank"
+    return table, g
 
 
-# ---------------------------------------------------------------- settings
+
 imgsz = 640
 stride = 3
 
-conf = 0.40         # confidence threshold: higher = fewer, more certain boxes
-iou = 0.10          # NMS overlap: lower = removes more overlapping boxes
-contain_thr = 0.50  # drop a box if this share of it lies inside a more confident box (1.0 = off)
+conf = 0.40        
+iou = 0.10          
+contain_thr = 0.50  
 
-st.title("🔍 Crack & Hole Detection")
-st.caption("Upload an image or a video, set where it was captured, and detect cracks and holes.")
+st.title("🔍 Crack Detection")
+st.caption("Upload an image or a video, set where it was captured, and detect cracks.")
 
 tab_img, tab_vid = st.tabs(["📷 Image", "🎥 Video"])
 
-# ------------------------------------------------------------------- image
+
+
 with tab_img:
     mode = st.radio("Image source", ["Upload photo", "Take photo"], horizontal=True)
     if mode == "Upload photo":
-        file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"], key="img_up")
+        
+        file = st.file_uploader(
+            "Choose an image", type=["jpg", "jpeg", "png", "webp"], key="img_up"
+        )
     else:
-        cam_col, _ = st.columns([1, 2])  # camera takes 1/3 of the page width
+        cam_col, _ = st.columns([1, 2])  
         with cam_col:
             file = st.camera_input("Capture an image")
 
@@ -277,9 +361,12 @@ with tab_img:
         gps, taken = read_exif(raw) if mode == "Upload photo" else (None, None)
         img = ImageOps.exif_transpose(raw).convert("RGB")
 
-        location, source = pick_location("img", gps, quiet=True)
+        if gps:
+            location, source = gps, "Photo EXIF"
+        else:
+            location = device_location("img", quiet=True)
+            source = "Device location" if location else None
 
-        # Only warn when there is no location at all (neither photo GPS nor device location)
         if not location:
             st.warning(
                 "No location found yet. The photo has no GPS data, so allow location access "
@@ -292,46 +379,69 @@ with tab_img:
             if location:
                 if taken:
                     st.write(f"**Captured:** {taken}")
-                st.map(pd.DataFrame({"lat": [location[0]], "lon": [location[1]]}), zoom=14)
+                show_map([{"lat": location[0], "lon": location[1], "r": 8}], height=300)
 
         if st.button("Run detection", type="primary", key="img_run"):
             with st.spinner("Detecting..."):
                 res = model.predict(
-                    img, conf=conf, iou=iou, agnostic_nms=True, imgsz=imgsz, verbose=False
+                    img, conf=conf, iou=iou, agnostic_nms=True, imgsz=imgsz,
+                    classes=CRACK_IDS, verbose=False
                 )[0]
                 res = remove_overlaps(res, contain_thr)
                 annotated = res.plot(line_width=2, font_size=10)[:, :, ::-1]
-                counts = count_types(res)
-            st.image(
-                annotated,
-                caption=f"{counts['crack']} crack(s), {counts['hole']} hole(s) detected",
-                use_container_width=True,
-            )
-            add_log(
-                "image",
-                getattr(file, "name", "camera.jpg"),
-                location,
-                source,
-                counts["crack"],
-                counts["hole"],
-            )
+                n_cracks = count_cracks(res)
+            st.image(annotated, caption=f"{n_cracks} crack(s) detected", use_container_width=True)
+            add_log("image", getattr(file, "name", "camera.jpg"), location, source, n_cracks)
 
-# ------------------------------------------------------------------- video
+
+
 with tab_vid:
     st.info(
-        "Each crack/hole is tracked across frames and logged separately. "
-        "All of them get the device location."
+        "Each crack is tracked across frames and logged separately with its own location. "
+        "Location priority: GPX track (a different location per crack) → GPS saved inside the "
+        "video file (one location for the whole video) → device location."
     )
     vid = st.file_uploader("Choose a video", type=["mp4", "mov", "avi", "mkv"], key="vid_up")
+    gpx_file = st.file_uploader(
+        "Optional: GPX track recorded while filming (gives each crack its own location)",
+        type=["gpx"],
+        key="gpx_up",
+    )
+    offset = st.number_input(
+        "GPX offset in seconds (use if the GPX recording started before/after the video)",
+        value=0.0, step=1.0,
+    )
 
     if vid:
         st.video(vid)
 
-        fixed, v_source = pick_location("vid")
-        locator = (lambda t, f=fixed: f) if fixed else None
+        locator, v_source = None, None
+
+        if gpx_file:
+            try:
+                pts = parse_gpx(gpx_file.getvalue())
+                if len(pts) < 2:
+                    st.error("The GPX file needs at least 2 track points with timestamps.")
+                else:
+                    locator, v_source = gpx_locator(pts, offset), "GPX track"
+                    st.success(f"GPX loaded: {len(pts)} points.")
+            except Exception as e:
+                st.error(f"Could not read the GPX file: {e}")
 
         if locator is None:
-            st.warning("Waiting for the device location. Allow location access in your browser.")
+            meta = video_metadata_location(vid.getvalue())
+            if meta:
+                locator, v_source = (lambda t, f=meta: f), "Video metadata"
+                st.success(f"GPS found inside the video: {meta[0]:.6f}, {meta[1]:.6f} "
+                           "(one location for all cracks).")
+
+        if locator is None:
+            dev = device_location("vid")
+            if dev:
+                locator, v_source = (lambda t, f=dev: f), "Device location"
+            else:
+                st.warning("No GPX or video GPS found. Waiting for the device location. "
+                           "Allow location access in your browser.")
 
         if locator is not None and st.button("Run detection on video", type="primary", key="vid_run"):
             suffix = os.path.splitext(vid.name)[1] or ".mp4"
@@ -350,10 +460,10 @@ with tab_vid:
                 out_path, cv2.VideoWriter_fourcc(*"mp4v"), max(fps / stride, 1), (w, h)
             )
 
-            model.predictor = None  # reset tracker state for a new video
-            seen = set()  # (kind, track_id) already registered
-            events = []  # one entry per unique defect
-            peak = {"crack": 0, "hole": 0}
+            model.predictor = None  
+            seen = set() 
+            events = []  
+            peak = 0
             best, idx = [], 0
             bar = st.progress(0.0, text="Analyzing video...")
 
@@ -364,26 +474,21 @@ with tab_vid:
                 if idx % stride == 0:
                     t_sec = idx / fps
                     res = model.track(
-                        frame, persist=True, conf=conf, iou=iou,
-                        agnostic_nms=True, imgsz=imgsz, verbose=False
+                        frame, persist=True, conf=conf, iou=iou, agnostic_nms=True,
+                        imgsz=imgsz, classes=CRACK_IDS, verbose=False
                     )[0]
                     res = remove_overlaps(res, contain_thr)
-                    counts = count_types(res)
-                    for k in peak:
-                        peak[k] = max(peak[k], counts[k])
+                    n = count_cracks(res)
+                    peak = max(peak, n)
 
                     if res.boxes is not None and res.boxes.id is not None:
-                        for tid, c in zip(
-                            res.boxes.id.int().tolist(), res.boxes.cls.int().tolist()
-                        ):
-                            k = kind_of(c)
-                            if k and (k, tid) not in seen:
-                                seen.add((k, tid))
-                                events.append((k, t_sec, locator(t_sec)))
+                        for tid in res.boxes.id.int().tolist():
+                            if tid not in seen:
+                                seen.add(tid)
+                                events.append((t_sec, locator(t_sec)))
 
                     plotted = res.plot(line_width=2, font_size=10)
                     writer.write(plotted)
-                    n = counts["crack"] + counts["hole"]
                     if n > 0:
                         best.append((n, plotted[:, :, ::-1].copy()))
                         best = sorted(best, key=lambda x: -x[0])[:4]
@@ -395,51 +500,33 @@ with tab_vid:
             writer.release()
             bar.progress(1.0, text="Done")
 
-            # Fallback if the tracker produced no IDs: one summary row at the start
-            if not events and (peak["crack"] or peak["hole"]):
-                st.warning("Tracker gave no IDs; logged peak counts at the video start location.")
-                add_logs(
-                    [("video", vid.name, locator(0.0), v_source, peak["crack"], peak["hole"], None)]
-                )
+            if not events and peak:
+                st.warning("Tracker gave no IDs; logged the peak count at the video start location.")
+                add_logs([("video", vid.name, locator(0.0), v_source, peak, None)])
             else:
-                add_logs(
-                    [
-                        (
-                            "video",
-                            vid.name,
-                            loc,
-                            v_source,
-                            1 if k == "crack" else 0,
-                            1 if k == "hole" else 0,
-                            t,
-                        )
-                        for k, t, loc in events
-                    ]
-                )
+                add_logs([("video", vid.name, loc, v_source, 1, t) for t, loc in events])
 
-            n_c = sum(1 for e in events if e[0] == "crack")
-            n_h = sum(1 for e in events if e[0] == "hole")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Cracks (tracked)", n_c)
-            m2.metric("Holes (tracked)", n_h)
-            m3.metric("Most defects in one frame", max(peak.values()))
+            m1, m2 = st.columns(2)
+            m1.metric("Cracks (tracked)", len(events))
+            m2.metric("Most cracks in one frame", peak)
 
             if events:
                 ev_df = pd.DataFrame(
                     [
-                        {"type": k, "video_time_s": round(t, 1), "lat": loc[0], "lon": loc[1]}
-                        for k, t, loc in events
+                        {"crack": i, "video_time_s": round(t, 1), "lat": loc[0], "lon": loc[1]}
+                        for i, (t, loc) in enumerate(events, start=1)
                     ]
                 )
-                st.subheader("Each defect and where it was")
-                st.dataframe(ev_df, use_container_width=True)
-                st.map(ev_df[["lat", "lon"]])
+                st.subheader("Each crack and where it was")
+                st.dataframe(ev_df, use_container_width=True, hide_index=True)
+                show_map([{"lat": r.lat, "lon": r.lon, "r": 7, "label": f"Crack {r.crack} ({r.video_time_s} s)"}
+                          for r in ev_df.itertuples()])
 
             if best:
-                st.subheader("Frames with the most defects")
+                st.subheader("Frames with the most cracks")
                 cols = st.columns(len(best))
                 for col, (n, fr) in zip(cols, best):
-                    col.image(fr, caption=f"{n} defect(s)", use_container_width=True)
+                    col.image(fr, caption=f"{n} crack(s)", use_container_width=True)
 
             with open(out_path, "rb") as f:
                 st.download_button("Download annotated video", f.read(), "annotated.mp4", "video/mp4")
@@ -450,34 +537,29 @@ with tab_vid:
                 except OSError:
                     pass
 
-# ------------------------------------------------------------- saved table
+
+
 df = load_log()
 
 if not df.empty:
     st.divider()
-    st.subheader("📍 Locations ranked by cracks and holes")
-    ranked = ranked_by_location(df)
-    shown = ranked.drop(columns=["lat", "lon"])
-    labels, n = [], 0
-    with st.spinner("Looking up area names..."):
-        for la_, lo_ in zip(ranked["lat"], ranked["lon"]):
-            if pd.isna(la_) or pd.isna(lo_):
-                labels.append(NO_LOCATION)
-            else:
-                n += 1
-                fallback = f"Location {n}"
-                # only look up the top 15 places to stay within the free service's limits
-                labels.append(place_label(la_, lo_, fallback) if n <= 15 else fallback)
-    shown.insert(0, "location", labels)
-    st.dataframe(shown, use_container_width=True)
+    st.subheader("📍 Governorates ranked by cracks")
+    with st.spinner("Looking up governorates..."):
+        ranked, grid = ranked_by_governorate(df)
+    st.dataframe(ranked, use_container_width=True)
 
-    with_loc = ranked.dropna(subset=["lat", "lon"])
-    if not with_loc.empty:
-        st.map(with_loc.assign(size=with_loc["total_defects"] * 5 + 10), size="size")
+    with_loc = grid.dropna(subset=["lat", "lon"])
+    show_map(
+        [
+            {"lat": r.lat, "lon": r.lon, "r": min(8 + r.total_cracks * 2, 30),
+             "label": f"{r.governorate}: {int(r.total_cracks)} crack(s)"}
+            for r in with_loc.itertuples()
+        ]
+    )
 
     missing = int(df["latitude"].isna().sum())
     if missing:
-        st.caption(f"{missing} detection(s) have no location (shown in the row with empty lat/lon).")
+        st.caption(f"{missing} detection(s) have no location (shown as '{NO_LOCATION}').")
 
     with st.expander("Full detection log"):
         st.dataframe(tidy_log(df), use_container_width=True)
