@@ -8,6 +8,7 @@ import time
 import xml.etree.ElementTree as ET
 from contextlib import closing
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -19,10 +20,217 @@ from PIL import Image, ImageOps
 
 st.set_page_config(page_title="Crack Detection", page_icon="🔍", layout="wide")
 
+st.markdown(
+    """
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+      html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      }
+
+      .stApp {
+        background:
+          radial-gradient(circle at 12% 8%, rgba(220, 38, 38, 0.06), transparent 36%),
+          radial-gradient(circle at 88% 12%, rgba(15, 23, 42, 0.06), transparent 38%),
+          #f1f5f9;
+      }
+
+      .block-container {
+        padding-top: 1.8rem;
+        padding-bottom: 3.5rem;
+        max-width: 1320px;
+      }
+
+      /* Top Hero Banner */
+      .app-banner {
+        position: relative;
+        overflow: hidden;
+        background: linear-gradient(125deg, #090d16 0%, #172033 52%, #7f1d1d 100%);
+        color: #f8fafc;
+        padding: 1.65rem 1.95rem;
+        border-radius: 18px;
+        margin-bottom: 1.4rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 14px 34px rgba(15, 23, 42, 0.18);
+      }
+      .app-banner::after {
+        content: "";
+        position: absolute;
+        top: -45%;
+        right: -8%;
+        width: 280px;
+        height: 280px;
+        background: radial-gradient(circle, rgba(248, 113, 113, 0.22) 0%, transparent 70%);
+        pointer-events: none;
+      }
+      .app-badge {
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #fca5a5;
+        background: rgba(127, 29, 29, 0.55);
+        border: 1px solid rgba(252, 165, 165, 0.28);
+        padding: 0.22rem 0.65rem;
+        border-radius: 999px;
+        margin-bottom: 0.55rem;
+      }
+      .app-banner h1 {
+        margin: 0;
+        font-size: 1.9rem;
+        font-weight: 800;
+        letter-spacing: -0.025em;
+        color: #ffffff;
+      }
+      .app-banner p {
+        margin: 0.4rem 0 0;
+        font-size: 0.96rem;
+        color: #cbd5e1;
+        max-width: 760px;
+      }
+
+      /* Section Headers */
+      .section-kicker {
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #dc2626;
+        margin-bottom: 0.15rem;
+      }
+
+      /* Metric Cards */
+      div[data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-top: 3px solid #dc2626;
+        border-radius: 14px;
+        padding: 1rem 1.15rem;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+      }
+      div[data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+      }
+      div[data-testid="stMetric"] label {
+        color: #64748b;
+        font-weight: 600;
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #0f172a;
+        font-weight: 800;
+        font-size: 1.65rem;
+      }
+
+      /* Tabs */
+      .stTabs [data-baseweb="tab-list"] {
+        gap: 0.55rem;
+        background: #e2e8f0;
+        padding: 0.35rem;
+        border-radius: 12px;
+        width: fit-content;
+      }
+      .stTabs [data-baseweb="tab"] {
+        border-radius: 9px;
+        padding: 0.5rem 1.2rem;
+        font-weight: 700;
+        color: #334155;
+        background: transparent;
+        border: none;
+      }
+      .stTabs [aria-selected="true"] {
+        background: #ffffff !important;
+        color: #b91c1c !important;
+        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08);
+      }
+
+      /* File Uploaders & Alerts */
+      div[data-testid="stFileUploader"] section {
+        background: #ffffff;
+        border: 1.5px dashed #cbd5e1;
+        border-radius: 14px;
+        transition: border-color 0.15s ease, background-color 0.15s ease;
+      }
+      div[data-testid="stFileUploader"] section:hover {
+        border-color: #dc2626;
+        background: #fffafa;
+      }
+      div[data-testid="stAlert"] {
+        border-radius: 12px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        box-shadow: 0 3px 12px rgba(15, 23, 42, 0.04);
+      }
+
+      /* Buttons */
+      .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+        color: #ffffff;
+        border: none;
+        border-radius: 10px;
+        font-weight: 700;
+        padding: 0.6rem 1.35rem;
+        box-shadow: 0 6px 16px rgba(185, 28, 28, 0.25);
+        transition: transform 0.12s ease, box-shadow 0.15s ease, filter 0.15s ease;
+      }
+      .stButton > button[kind="primary"]:hover {
+        filter: brightness(1.06);
+        transform: translateY(-1px);
+        box-shadow: 0 8px 20px rgba(185, 28, 28, 0.34);
+      }
+      .stButton > button[kind="secondary"] {
+        border-radius: 10px;
+        font-weight: 600;
+        border: 1px solid #fca5a5;
+        color: #b91c1c;
+        background: #fef2f2;
+      }
+      .stButton > button[kind="secondary"]:hover {
+        background: #fee2e2;
+        border-color: #ef4444;
+      }
+
+      /* Images, DataFrames & Expanders */
+      div[data-testid="stImage"] img {
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.07);
+      }
+      div[data-testid="stDataFrame"] {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        overflow: hidden;
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+      }
+      div[data-testid="stExpander"] {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+      }
+      hr {
+        border-color: #e2e8f0;
+        margin: 2rem 0;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 MODEL_PATH = "best_pretrained.pt"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detections.db")
 NO_LOCATION = "No given location"
+APP_TIMEZONE = ZoneInfo("Asia/Bahrain")
 
+
+def current_time_str() -> str:
+    return datetime.now(APP_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def init_db():
@@ -50,7 +258,7 @@ def init_db():
 
 def add_logs(rows):
     """rows: list of (kind, name, location, source, cracks, video_time)"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = current_time_str()
     data = [
         (now, k, n, loc[0] if loc else None, loc[1] if loc else None, s, int(c), 0, vt)
         for k, n, loc, s, c, vt in rows
@@ -76,7 +284,7 @@ def load_log() -> pd.DataFrame:
     with closing(sqlite3.connect(DB_PATH)) as conn:
         return pd.read_sql_query(
             "SELECT time, type, file, latitude, longitude, location_source, "
-            "cracks_found, video_time FROM detections ORDER BY id",
+            "cracks_found, video_time FROM detections WHERE cracks_found > 0 ORDER BY id",
             conn,
         )
 
@@ -88,7 +296,6 @@ def clear_log():
 
 
 init_db()
-
 
 
 @st.cache_resource
@@ -263,7 +470,6 @@ def governorate_label(lat, lon, fallback: str) -> str:
         return fallback
 
 
-
 TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
 TILE_ATTR = "Tiles &copy; Esri"
 
@@ -275,7 +481,7 @@ def show_map(points, height: int = 400):
     html = f"""
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <div id="map" style="height:{height}px;border-radius:8px"></div>
+    <div id="map" style="height:{height}px;border-radius:14px;border:1px solid #e2e8f0;box-shadow:0 8px 24px rgba(15,23,42,0.08);"></div>
     <script>
       const pts = {json.dumps(points)};
       const map = L.map('map');
@@ -283,22 +489,21 @@ def show_map(points, height: int = 400):
       const bounds = [];
       pts.forEach(p => {{
         const m = L.circleMarker([p.lat, p.lon],
-          {{radius: p.r, color: '#d62728', fillColor: '#d62728', fillOpacity: 0.6}}).addTo(map);
-        if (p.label) m.bindTooltip(p.label);
+          {{radius: p.r, color: '#b91c1c', weight: 2, fillColor: '#ef4444', fillOpacity: 0.68}}).addTo(map);
+        if (p.label) m.bindTooltip(p.label, {{direction: 'top'}});
         bounds.push([p.lat, p.lon]);
       }});
       if (bounds.length === 1) map.setView(bounds[0], 16);
       else map.fitBounds(bounds, {{padding: [30, 30]}});
     </script>
     """
-    components.html(html, height=height + 10)
-
+    components.html(html, height=height + 16)
 
 
 def ranked_by_governorate(df: pd.DataFrame):
     """Name each place with its governorate and rank governorates by cracks.
     Returns (ranked table, grid points for the map)."""
-    d = df.copy()
+    d = df[df["cracks_found"] > 0].copy()
     d["lat"] = d["latitude"].round(4)  # ~11 m grid, used for the map
     d["lon"] = d["longitude"].round(4)
     g = d.groupby(["lat", "lon"], as_index=False, dropna=False).agg(
@@ -307,7 +512,6 @@ def ranked_by_governorate(df: pd.DataFrame):
     )
     g = g.sort_values("total_cracks", ascending=False).reset_index(drop=True)
 
-    
     names, labels = {}, []
     for la, lo in zip(g["lat"], g["lon"]):
         if pd.isna(la) or pd.isna(lo):
@@ -323,36 +527,42 @@ def ranked_by_governorate(df: pd.DataFrame):
         total_cracks=("total_cracks", "sum"),
         last_detection=("last_detection", "max"),
     )
+    table = table[table["total_cracks"] > 0]
     table = table.sort_values("total_cracks", ascending=False).reset_index(drop=True)
     table.index = table.index + 1
     table.index.name = "rank"
     return table, g
 
 
-
 imgsz = 640
 stride = 3
 
-conf = 0.40        
-iou = 0.10          
-contain_thr = 0.50  
+conf = 0.40
+iou = 0.10
+contain_thr = 0.50
 
-st.title("🔍 Crack Detection")
-st.caption("Upload an image or a video, set where it was captured, and detect cracks.")
+st.markdown(
+    """
+    <div class="app-banner">
+      <div class="app-badge">Infrastructure Inspection</div>
+      <h1>🔍 Crack Detection</h1>
+      <p>Upload an image or a video, attach capture location data, and inspect detected surface cracks.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 tab_img, tab_vid = st.tabs(["📷 Image", "🎥 Video"])
-
 
 
 with tab_img:
     mode = st.radio("Image source", ["Upload photo", "Take photo"], horizontal=True)
     if mode == "Upload photo":
-        
         file = st.file_uploader(
             "Choose an image", type=["jpg", "jpeg", "png", "webp"], key="img_up"
         )
     else:
-        cam_col, _ = st.columns([1, 2])  
+        cam_col, _ = st.columns([1, 2])
         with cam_col:
             file = st.camera_input("Capture an image")
 
@@ -392,7 +602,6 @@ with tab_img:
                 n_cracks = count_cracks(res)
             st.image(annotated, caption=f"{n_cracks} crack(s) detected", use_container_width=True)
             add_log("image", getattr(file, "name", "camera.jpg"), location, source, n_cracks)
-
 
 
 with tab_vid:
@@ -452,7 +661,8 @@ with tab_vid:
 
             cap = cv2.VideoCapture(in_path)
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-            fps = cap.get(cv2.CAP_PROP_FPS) or 25
+            raw_fps = cap.get(cv2.CAP_PROP_FPS)
+            fps = raw_fps if raw_fps and raw_fps > 0 else 25.0
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -460,9 +670,9 @@ with tab_vid:
                 out_path, cv2.VideoWriter_fourcc(*"mp4v"), max(fps / stride, 1), (w, h)
             )
 
-            model.predictor = None  
-            seen = set() 
-            events = []  
+            model.predictor = None
+            seen = set()
+            events = []
             peak = 0
             best, idx = [], 0
             bar = st.progress(0.0, text="Analyzing video...")
@@ -472,11 +682,18 @@ with tab_vid:
                 if not ok:
                     break
                 if idx % stride == 0:
-                    t_sec = idx / fps
-                    res = model.track(
-                        frame, persist=True, conf=conf, iou=iou, agnostic_nms=True,
-                        imgsz=imgsz, classes=CRACK_IDS, verbose=False
-                    )[0]
+                    pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    t_sec = (pos_msec / 1000.0) if pos_msec and pos_msec > 0 else (idx / fps)
+                    try:
+                        res = model.track(
+                            frame, persist=True, conf=conf, iou=iou, agnostic_nms=True,
+                            imgsz=imgsz, classes=CRACK_IDS, verbose=False
+                        )[0]
+                    except ModuleNotFoundError:
+                        res = model.predict(
+                            frame, conf=conf, iou=iou, agnostic_nms=True,
+                            imgsz=imgsz, classes=CRACK_IDS, verbose=False
+                        )[0]
                     res = remove_overlaps(res, contain_thr)
                     n = count_cracks(res)
                     peak = max(peak, n)
@@ -503,7 +720,7 @@ with tab_vid:
             if not events and peak:
                 st.warning("Tracker gave no IDs; logged the peak count at the video start location.")
                 add_logs([("video", vid.name, locator(0.0), v_source, peak, None)])
-            else:
+            elif events:
                 add_logs([("video", vid.name, loc, v_source, 1, t) for t, loc in events])
 
             m1, m2 = st.columns(2)
@@ -517,12 +734,14 @@ with tab_vid:
                         for i, (t, loc) in enumerate(events, start=1)
                     ]
                 )
+                st.markdown('<div class="section-kicker">Timeline & Coordinates</div>', unsafe_allow_html=True)
                 st.subheader("Each crack and where it was")
                 st.dataframe(ev_df, use_container_width=True, hide_index=True)
                 show_map([{"lat": r.lat, "lon": r.lon, "r": 7, "label": f"Crack {r.crack} ({r.video_time_s} s)"}
                           for r in ev_df.itertuples()])
 
             if best:
+                st.markdown('<div class="section-kicker">Key Snapshots</div>', unsafe_allow_html=True)
                 st.subheader("Frames with the most cracks")
                 cols = st.columns(len(best))
                 for col, (n, fr) in zip(cols, best):
@@ -538,11 +757,11 @@ with tab_vid:
                     pass
 
 
-
 df = load_log()
 
 if not df.empty:
     st.divider()
+    st.markdown('<div class="section-kicker">Regional Summary</div>', unsafe_allow_html=True)
     st.subheader("📍 Governorates ranked by cracks")
     with st.spinner("Looking up governorates..."):
         ranked, grid = ranked_by_governorate(df)
