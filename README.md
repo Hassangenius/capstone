@@ -20,6 +20,9 @@ Input size	640 pixels
 Confidence threshold	0.40. Boxes the model is less than 40% sure about are dropped.
 Overlap handling	Overlapping boxes are cleaned up, and a box mostly covered by a more confident box is removed.
 Video	Every third frame is analysed, and a tracker gives each crack an ID so it is counted once.
+
+App link
+https://capstone-dqqxklnefs56yncy42hitj.streamlit.app/
 How the app works
 Capture
 The user uploads a photo (JPG, PNG or WebP), takes one with the phone camera, or uploads a video.
